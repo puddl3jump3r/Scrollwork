@@ -1,0 +1,28 @@
+# Nexus Agent Dependencies
+# Python 3.12 compatible
+
+# Web server
+fastapi>=0.115.0,<1.0
+uvicorn[standard]>=0.32.0,<1.0
+websockets>=13.0,<14.0
+
+# Async HTTP client
+aiohttp>=3.10.0,<4.0
+
+# HTML parsing
+beautifulsoup4>=4.12.0,<5.0
+
+# Async SQLite
+aiosqlite>=0.20.0,<1.0
+
+# Environment variables
+python-dotenv>=1.0.0,<2.0
+
+# Serial communication (Proxmark/USB)
+pyserial>=3.5,<4.0
+
+# Data validation
+pydantic>=2.0,<3.0
+
+# Rich terminal output
+rich>=13.0,<14.0
