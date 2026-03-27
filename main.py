@@ -58,6 +58,8 @@ class AgentManager:
         self.mcp_config = mcp_config
         self.user_manager = UserManager(self.data_dir)
         self._agents: dict[str, NexusAgent] = {}
+        self._agent_locks: dict[str, asyncio.Lock] = {}
+        self._global_lock = asyncio.Lock()
 
     async def initialize(self) -> None:
         """Initialize shared resources."""
@@ -70,30 +72,45 @@ class AgentManager:
         logger.info("  Workspace: %s", self.workspace_dir)
 
     async def get_agent(self, username: str) -> NexusAgent:
-        """Get or create an agent instance for a specific user."""
+        """Get or create an agent instance for a specific user.
+
+        Uses per-user locks to prevent duplicate initialization when
+        multiple requests arrive concurrently for the same user.
+        """
         if username in self._agents:
             return self._agents[username]
 
-        # Per-user directories
-        user_data = self.user_manager.get_user_data_dir(username)
-        user_workspace = self.user_manager.get_user_workspace_dir(username)
+        # Get or create a per-user lock
+        async with self._global_lock:
+            if username not in self._agent_locks:
+                self._agent_locks[username] = asyncio.Lock()
+            user_lock = self._agent_locks[username]
 
-        agent = NexusAgent(
-            ollama_host=self.ollama_host,
-            workspace_dir=user_workspace,
-            data_dir=user_data,
-            mcp_config=self.mcp_config,
-        )
+        async with user_lock:
+            # Double-check after acquiring lock
+            if username in self._agents:
+                return self._agents[username]
 
-        logger.info("Initializing agent for user: %s", username)
-        status = await agent.initialize()
+            # Per-user directories
+            user_data = self.user_manager.get_user_data_dir(username)
+            user_workspace = self.user_manager.get_user_workspace_dir(username)
 
-        logger.info("Agent ready for %s: ollama=%s models=%s",
-                    username, status.get("ollama", False),
-                    status.get("models_available", 0))
+            agent = NexusAgent(
+                ollama_host=self.ollama_host,
+                workspace_dir=user_workspace,
+                data_dir=user_data,
+                mcp_config=self.mcp_config,
+            )
 
-        self._agents[username] = agent
-        return agent
+            logger.info("Initializing agent for user: %s", username)
+            status = await agent.initialize()
+
+            logger.info("Agent ready for %s: ollama=%s models=%s",
+                        username, status.get("ollama", False),
+                        status.get("models_available", 0))
+
+            self._agents[username] = agent
+            return agent
 
     async def remove_agent(self, username: str) -> None:
         """Shut down and remove a user's agent instance."""
