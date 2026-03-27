@@ -832,6 +832,21 @@ class NexusAgent:
         content = re.sub(r"\n{3,}", "\n\n", content)
         return content.strip()
 
+    @staticmethod
+    def _safe_rel_path(raw: str) -> str:
+        """Sanitise a user-supplied relative path.
+
+        Strips leading slashes, normalises '.' / './' / '/' to empty string
+        so that os.path.join(workspace, result) always stays inside the
+        workspace directory.
+        """
+        # Strip leading separators so "/" doesn't override the base
+        cleaned = raw.lstrip("/").lstrip("\\")
+        # Normalise current-dir references to empty string
+        if cleaned in (".", "./", ".\\" ""):
+            cleaned = ""
+        return cleaned
+
     async def _execute_tool(
         self, tool_name: str, arguments: dict[str, Any]
     ) -> Any:
@@ -844,7 +859,8 @@ class NexusAgent:
             # Built-in tools
             match tool_name:
                 case "read_file":
-                    path = os.path.join(self.workspace_dir, arguments["path"])
+                    rel = self._safe_rel_path(arguments["path"])
+                    path = os.path.join(self.workspace_dir, rel)
                     if not os.path.abspath(path).startswith(self.workspace_dir):
                         return {"error": "Access denied: path outside workspace"}
                     if not os.path.exists(path):
@@ -853,7 +869,8 @@ class NexusAgent:
                         return {"content": f.read(), "path": arguments["path"]}
 
                 case "write_file":
-                    path = os.path.join(self.workspace_dir, arguments["path"])
+                    rel = self._safe_rel_path(arguments["path"])
+                    path = os.path.join(self.workspace_dir, rel)
                     if not os.path.abspath(path).startswith(self.workspace_dir):
                         return {"error": "Access denied: path outside workspace"}
                     parent = os.path.dirname(path)
@@ -864,14 +881,15 @@ class NexusAgent:
                     return {"success": True, "path": arguments["path"]}
 
                 case "make_directory":
-                    path = os.path.join(self.workspace_dir, arguments["path"])
+                    rel = self._safe_rel_path(arguments["path"])
+                    path = os.path.join(self.workspace_dir, rel)
                     if not os.path.abspath(path).startswith(self.workspace_dir):
                         return {"error": "Access denied: path outside workspace"}
                     os.makedirs(path, exist_ok=True)
                     return {"success": True, "path": arguments["path"]}
 
                 case "list_files":
-                    rel_path = arguments.get("path", "")
+                    rel_path = self._safe_rel_path(arguments.get("path", ""))
                     path = os.path.join(self.workspace_dir, rel_path)
                     if not os.path.abspath(path).startswith(self.workspace_dir):
                         return {"error": "Access denied: path outside workspace"}
