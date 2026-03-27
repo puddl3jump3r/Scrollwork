@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from pathlib import Path
@@ -42,7 +43,16 @@ IMPORTANT GUIDELINES:
 6. For complex tasks, create a plan first
 7. Reflect on results and adjust your approach as needed
 
-When you want to use a tool, call it by name with the required arguments.
+IMPORTANT: You MUST actually call tools to perform actions. Do NOT just describe what
+you would do or output JSON examples. When you want to use a tool, you must use a
+proper function/tool call. If your model supports tool calling, use the tool_calls
+format. Otherwise, output EXACTLY one JSON block per tool call in this format:
+
+```tool_call
+{"name": "tool_name", "arguments": {"arg1": "value1"}}
+```
+
+After calling a tool, wait for the result before continuing.
 Always explain what you're doing and why.
 """
 
@@ -76,6 +86,20 @@ def _build_builtin_tools() -> list[dict[str, Any]]:
                         "content": {"type": "string", "description": "Content to write"},
                     },
                     "required": ["path", "content"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "make_directory",
+                "description": "Create a directory in the workspace",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Directory path relative to workspace"},
+                    },
+                    "required": ["path"],
                 },
             },
         },
@@ -474,6 +498,19 @@ class NexusAgent:
             content = msg.get("content", "")
             tool_calls = msg.get("tool_calls", [])
 
+            # If no native tool_calls, try parsing from text content
+            if not tool_calls and content:
+                parsed = self._parse_tool_calls_from_text(content)
+                if parsed:
+                    tool_calls = parsed
+                    # Strip tool call blocks from content so we keep
+                    # only the explanatory text for display
+                    display_content = self._strip_tool_blocks(content)
+                    if display_content.strip():
+                        msg["content"] = display_content
+                    # Set tool_calls on msg so it gets appended correctly
+                    msg["tool_calls"] = tool_calls
+
             if not tool_calls:
                 # No tool calls - this is the final response
                 self.reasoning.add_thought(ThoughtType.CONCLUSION, content[:200])
@@ -698,6 +735,91 @@ class NexusAgent:
 
         return steps
 
+    def _parse_tool_calls_from_text(self, content: str) -> list[dict[str, Any]]:
+        """Parse tool calls embedded in text content from models that don't
+        support native tool calling (e.g. mistral:7b, older llama models).
+
+        Supports multiple formats that LLMs commonly output:
+        1. ```tool_call\n{"name": "...", "arguments": {...}}\n```
+        2. ```json\n{"name": "...", "arguments": {...}}\n```
+        3. Bare JSON objects with "name" and "arguments" keys
+        4. {"name": "tool_name", "arguments": {...}} inline in text
+        """
+        tool_calls: list[dict[str, Any]] = []
+        known_tools = {t["function"]["name"] for t in _build_builtin_tools()}
+
+        # Pattern 1: fenced code blocks (```tool_call, ```json, or bare ```)
+        fenced_pattern = re.compile(
+            r"```(?:tool_call|json)?\s*\n?\s*(\{.*?\})\s*\n?\s*```",
+            re.DOTALL,
+        )
+        for match in fenced_pattern.finditer(content):
+            parsed = self._try_parse_tool_json(match.group(1), known_tools)
+            if parsed:
+                tool_calls.append(parsed)
+
+        if tool_calls:
+            return tool_calls
+
+        # Pattern 2: bare JSON objects with "name" key on their own line(s)
+        # Match JSON objects that contain "name" - greedy but bounded
+        bare_pattern = re.compile(
+            r'\{\s*"name"\s*:\s*"(\w+)"\s*,\s*"arguments"\s*:\s*(\{.*?\})\s*\}',
+            re.DOTALL,
+        )
+        for match in bare_pattern.finditer(content):
+            name = match.group(1)
+            if name in known_tools:
+                try:
+                    args = json.loads(match.group(2))
+                    tool_calls.append({
+                        "function": {"name": name, "arguments": args},
+                    })
+                except json.JSONDecodeError:
+                    continue
+
+        return tool_calls
+
+    def _try_parse_tool_json(
+        self, text: str, known_tools: set[str]
+    ) -> dict[str, Any] | None:
+        """Try to parse a JSON string as a tool call."""
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            return None
+
+        if not isinstance(data, dict):
+            return None
+
+        name = data.get("name", "")
+        args = data.get("arguments", {})
+
+        if name and name in known_tools and isinstance(args, dict):
+            return {"function": {"name": name, "arguments": args}}
+        return None
+
+    def _strip_tool_blocks(self, content: str) -> str:
+        """Remove tool call JSON blocks from content, keeping explanation text."""
+        # Remove fenced tool call blocks
+        content = re.sub(
+            r"```(?:tool_call|json)?\s*\n?\s*\{.*?\}\s*\n?\s*```",
+            "",
+            content,
+            flags=re.DOTALL,
+        )
+        # Remove bare JSON tool call objects (possibly spanning multiple lines)
+        # Match opening { with "name" key through the closing }
+        content = re.sub(
+            r'\{\s*\n?\s*"name"\s*:\s*"[^"]+"\s*,\s*\n?\s*"arguments"\s*:\s*\{[^{}]*\}\s*\n?\s*\}',
+            "",
+            content,
+            flags=re.DOTALL,
+        )
+        # Clean up extra blank lines
+        content = re.sub(r"\n{3,}", "\n\n", content)
+        return content.strip()
+
     async def _execute_tool(
         self, tool_name: str, arguments: dict[str, Any]
     ) -> Any:
@@ -722,9 +844,18 @@ class NexusAgent:
                     path = os.path.join(self.workspace_dir, arguments["path"])
                     if not os.path.abspath(path).startswith(self.workspace_dir):
                         return {"error": "Access denied: path outside workspace"}
-                    os.makedirs(os.path.dirname(path), exist_ok=True)
+                    parent = os.path.dirname(path)
+                    if parent:
+                        os.makedirs(parent, exist_ok=True)
                     with open(path, "w") as f:
                         f.write(arguments["content"])
+                    return {"success": True, "path": arguments["path"]}
+
+                case "make_directory":
+                    path = os.path.join(self.workspace_dir, arguments["path"])
+                    if not os.path.abspath(path).startswith(self.workspace_dir):
+                        return {"error": "Access denied: path outside workspace"}
+                    os.makedirs(path, exist_ok=True)
                     return {"success": True, "path": arguments["path"]}
 
                 case "list_files":
