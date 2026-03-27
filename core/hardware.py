@@ -4,6 +4,7 @@ import asyncio
 import glob
 import logging
 import os
+import sys
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -18,50 +19,96 @@ class HardwareManager:
         self._lock = asyncio.Lock()
 
     async def list_usb_devices(self) -> list[dict[str, str]]:
-        """List available USB serial devices."""
+        """List available USB serial devices (cross-platform)."""
         devices: list[dict[str, str]] = []
 
-        # Common serial device paths
-        patterns = [
-            "/dev/ttyACM*",   # Proxmark3, Arduino
-            "/dev/ttyUSB*",   # USB-Serial adapters
-            "/dev/ttyS*",     # Built-in serial ports
-        ]
+        if sys.platform == "win32":
+            # Windows: Check COM ports
+            devices.extend(self._list_windows_com_ports())
+        else:
+            # Linux/macOS: Check /dev/tty* patterns
+            patterns = [
+                "/dev/ttyACM*",   # Proxmark3, Arduino
+                "/dev/ttyUSB*",   # USB-Serial adapters
+                "/dev/ttyS*",     # Built-in serial ports
+            ]
 
-        for pattern in patterns:
-            for path in glob.glob(pattern):
-                device_type = "unknown"
-                if "ACM" in path:
+            for pattern in patterns:
+                for path in glob.glob(pattern):
+                    device_type = "unknown"
+                    if "ACM" in path:
+                        device_type = "CDC ACM (Proxmark3/Arduino)"
+                    elif "USB" in path:
+                        device_type = "USB-Serial adapter"
+                    elif "ttyS" in path:
+                        device_type = "Built-in serial"
+
+                    devices.append({
+                        "path": path,
+                        "type": device_type,
+                        "accessible": os.access(path, os.R_OK | os.W_OK),
+                    })
+
+            # Also check for Proxmark specifically via lsusb-style detection
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    "lsusb",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, _ = await proc.communicate()
+                usb_list = stdout.decode()
+                for line in usb_list.splitlines():
+                    if any(kw in line.lower() for kw in ["proxmark", "9ac4", "2d2d"]):
+                        devices.append({
+                            "path": line.strip(),
+                            "type": "Proxmark3 (USB)",
+                            "accessible": True,
+                        })
+            except FileNotFoundError:
+                pass  # lsusb not available
+
+        return devices
+
+    def _list_windows_com_ports(self) -> list[dict[str, str]]:
+        """List COM ports on Windows."""
+        devices: list[dict[str, str]] = []
+
+        # Try pyserial's list_ports (best method)
+        try:
+            from serial.tools import list_ports
+            for port in list_ports.comports():
+                device_type = "Serial device"
+                desc_lower = (port.description or "").lower()
+                if any(kw in desc_lower for kw in ["proxmark", "acm", "arduino"]):
                     device_type = "CDC ACM (Proxmark3/Arduino)"
-                elif "USB" in path:
+                elif "usb" in desc_lower:
                     device_type = "USB-Serial adapter"
-                elif "ttyS" in path:
-                    device_type = "Built-in serial"
 
                 devices.append({
-                    "path": path,
+                    "path": port.device,
                     "type": device_type,
-                    "accessible": os.access(path, os.R_OK | os.W_OK),
+                    "description": port.description or "",
+                    "accessible": True,
                 })
+            return devices
+        except ImportError:
+            pass
 
-        # Also check for Proxmark specifically via lsusb-style detection
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "lsusb",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, _ = await proc.communicate()
-            usb_list = stdout.decode()
-            for line in usb_list.splitlines():
-                if any(kw in line.lower() for kw in ["proxmark", "9ac4", "2d2d"]):
-                    devices.append({
-                        "path": line.strip(),
-                        "type": "Proxmark3 (USB)",
-                        "accessible": True,
-                    })
-        except FileNotFoundError:
-            pass  # lsusb not available
+        # Fallback: scan COM1-COM20
+        for i in range(1, 21):
+            port = f"COM{i}"
+            try:
+                import serial
+                s = serial.Serial(port)
+                s.close()
+                devices.append({
+                    "path": port,
+                    "type": "Serial device",
+                    "accessible": True,
+                })
+            except (ImportError, OSError):
+                continue
 
         return devices
 
@@ -70,7 +117,7 @@ class HardwareManager:
         if device_path is None:
             # Auto-detect
             devices = await self.list_usb_devices()
-            pm_devices = [d for d in devices if "ACM" in d.get("path", "")]
+            pm_devices = [d for d in devices if "ACM" in d.get("type", "") or "COM" in d.get("path", "")]
             if not pm_devices:
                 return {"success": False, "error": "No Proxmark device found. Connect device and try again."}
             device_path = pm_devices[0]["path"]
@@ -124,7 +171,7 @@ class HardwareManager:
         # Fall back to direct serial
         if not self._serial_conn:
             devices = await self.list_usb_devices()
-            pm_devices = [d for d in devices if "ACM" in d.get("path", "")]
+            pm_devices = [d for d in devices if "ACM" in d.get("type", "") or "COM" in d.get("path", "")]
             if pm_devices:
                 result = await self.connect_proxmark(pm_devices[0]["path"])
                 if not result["success"]:
@@ -153,7 +200,8 @@ class HardwareManager:
     async def execute_system_command(self, command: str) -> dict[str, Any]:
         """Execute a system shell command (with safety checks)."""
         # Block dangerous commands
-        blocked = ["rm -rf /", "mkfs", "dd if=", ":(){", "fork bomb"]
+        blocked = ["rm -rf /", "mkfs", "dd if=", ":(){", "fork bomb",
+                   "format c:", "del /s /q", "rd /s /q c:\\"]
         cmd_lower = command.lower()
         for b in blocked:
             if b in cmd_lower:

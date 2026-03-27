@@ -12,17 +12,29 @@ class NexusApp {
         this.reconnectAttempts = 0;
         this.maxReconnectAttempts = 10;
         this.reconnectDelay = 2000;
+        this.authToken = localStorage.getItem('nexus_token');
+        this.currentUser = null;
 
         this.init();
     }
 
     init() {
+        this.bindLoginEvents();
+        if (this.authToken) {
+            this.checkAuth();
+        } else {
+            this.showLoginScreen();
+        }
+    }
+
+    initApp() {
         this.bindElements();
         this.bindEvents();
         this.connectWebSocket();
         this.loadStatus();
         this.loadModels();
         this.loadMCPStatus();
+        this.updateUserProfile();
     }
 
     bindElements() {
@@ -39,6 +51,176 @@ class NexusApp {
         this.charCount = document.getElementById('char-count');
         this.modeLabel = document.getElementById('current-mode-label');
         this.mcpPanel = document.getElementById('mcp-panel');
+    }
+
+    // --- Auth Methods ---
+
+    bindLoginEvents() {
+        document.getElementById('login-btn').addEventListener('click', () => this.doLogin());
+        document.getElementById('register-btn').addEventListener('click', () => this.doRegister());
+
+        document.getElementById('show-register').addEventListener('click', (e) => {
+            e.preventDefault();
+            document.getElementById('login-form').classList.add('hidden');
+            document.getElementById('register-form').classList.remove('hidden');
+        });
+
+        document.getElementById('show-login').addEventListener('click', (e) => {
+            e.preventDefault();
+            document.getElementById('register-form').classList.add('hidden');
+            document.getElementById('login-form').classList.remove('hidden');
+        });
+
+        // Enter key on login fields
+        document.getElementById('login-password').addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') this.doLogin();
+        });
+        document.getElementById('register-confirm').addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') this.doRegister();
+        });
+    }
+
+    showLoginScreen() {
+        document.getElementById('login-screen').classList.remove('hidden');
+        document.getElementById('app').classList.add('hidden');
+    }
+
+    showAppScreen() {
+        document.getElementById('login-screen').classList.add('hidden');
+        document.getElementById('app').classList.remove('hidden');
+    }
+
+    async checkAuth() {
+        try {
+            const resp = await this.authFetch('/api/auth/me');
+            if (resp.ok) {
+                const data = await resp.json();
+                if (data.authenticated) {
+                    this.currentUser = data.user;
+                    this.showAppScreen();
+                    this.initApp();
+                    return;
+                }
+            }
+        } catch (e) {
+            console.error('Auth check failed:', e);
+        }
+        // Token invalid or expired
+        this.authToken = null;
+        localStorage.removeItem('nexus_token');
+        this.showLoginScreen();
+    }
+
+    async doLogin() {
+        const username = document.getElementById('login-username').value.trim();
+        const password = document.getElementById('login-password').value;
+        const errorEl = document.getElementById('login-error');
+
+        if (!username || !password) {
+            errorEl.textContent = 'Please enter username and password';
+            errorEl.classList.remove('hidden');
+            return;
+        }
+
+        try {
+            const resp = await fetch('/api/auth/login', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username, password }),
+            });
+            const data = await resp.json();
+
+            if (data.success) {
+                this.authToken = data.token;
+                this.currentUser = data.user;
+                localStorage.setItem('nexus_token', data.token);
+                errorEl.classList.add('hidden');
+                this.showAppScreen();
+                this.initApp();
+            } else {
+                errorEl.textContent = data.error || 'Login failed';
+                errorEl.classList.remove('hidden');
+            }
+        } catch (e) {
+            errorEl.textContent = 'Could not reach server';
+            errorEl.classList.remove('hidden');
+        }
+    }
+
+    async doRegister() {
+        const username = document.getElementById('register-username').value.trim();
+        const displayName = document.getElementById('register-display').value.trim();
+        const password = document.getElementById('register-password').value;
+        const confirm = document.getElementById('register-confirm').value;
+        const errorEl = document.getElementById('register-error');
+
+        if (!username || !password) {
+            errorEl.textContent = 'Please fill in username and password';
+            errorEl.classList.remove('hidden');
+            return;
+        }
+        if (password !== confirm) {
+            errorEl.textContent = 'Passwords do not match';
+            errorEl.classList.remove('hidden');
+            return;
+        }
+
+        try {
+            const resp = await fetch('/api/auth/register', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username, password, display_name: displayName || undefined }),
+            });
+            const data = await resp.json();
+
+            if (data.success) {
+                this.authToken = data.token;
+                this.currentUser = data.user;
+                localStorage.setItem('nexus_token', data.token);
+                errorEl.classList.add('hidden');
+                this.showAppScreen();
+                this.initApp();
+            } else {
+                errorEl.textContent = data.error || 'Registration failed';
+                errorEl.classList.remove('hidden');
+            }
+        } catch (e) {
+            errorEl.textContent = 'Could not reach server';
+            errorEl.classList.remove('hidden');
+        }
+    }
+
+    async doLogout() {
+        try {
+            await this.authFetch('/api/auth/logout', { method: 'POST' });
+        } catch (e) {
+            // ignore
+        }
+        this.authToken = null;
+        this.currentUser = null;
+        localStorage.removeItem('nexus_token');
+        if (this.ws) {
+            this.ws.close();
+            this.ws = null;
+        }
+        this.showLoginScreen();
+    }
+
+    authFetch(url, options = {}) {
+        const headers = options.headers || {};
+        if (this.authToken) {
+            headers['Authorization'] = 'Bearer ' + this.authToken;
+        }
+        return fetch(url, { ...options, headers });
+    }
+
+    updateUserProfile() {
+        if (this.currentUser) {
+            const avatarEl = document.getElementById('user-avatar');
+            const nameEl = document.getElementById('user-display-name');
+            avatarEl.textContent = (this.currentUser.display_name || this.currentUser.username)[0].toUpperCase();
+            nameEl.textContent = this.currentUser.display_name || this.currentUser.username;
+        }
     }
 
     bindEvents() {
@@ -101,6 +283,9 @@ class NexusApp {
         document.getElementById('close-plan-btn').addEventListener('click', () => {
             this.planPanel.classList.add('hidden');
         });
+
+        // Logout
+        document.getElementById('logout-btn').addEventListener('click', () => this.doLogout());
     }
 
     // WebSocket Connection
@@ -111,10 +296,12 @@ class NexusApp {
         this.ws = new WebSocket(wsUrl);
 
         this.ws.onopen = () => {
-            this.isConnected = true;
             this.reconnectAttempts = 0;
-            this.updateConnectionStatus(true);
-            console.log('WebSocket connected');
+            console.log('WebSocket connected, sending auth...');
+            // Authenticate the WebSocket connection
+            if (this.authToken) {
+                this.ws.send(JSON.stringify({ type: 'auth', token: this.authToken }));
+            }
         };
 
         this.ws.onmessage = (event) => {
@@ -155,6 +342,17 @@ class NexusApp {
     // Message Handling
     handleServerMessage(data) {
         switch (data.type) {
+            case 'auth_ok':
+                this.isConnected = true;
+                this.updateConnectionStatus(true);
+                console.log('WebSocket authenticated');
+                break;
+
+            case 'auth_error':
+                console.error('WebSocket auth failed:', data.content);
+                this.doLogout();
+                break;
+
             case 'ack':
                 this.setProcessing(true);
                 break;
@@ -453,7 +651,7 @@ class NexusApp {
     // API Calls
     async loadStatus() {
         try {
-            const resp = await fetch('/api/status');
+            const resp = await this.authFetch('/api/status');
             const data = await resp.json();
 
             document.getElementById('ollama-status').className =
@@ -470,7 +668,7 @@ class NexusApp {
 
     async loadModels() {
         try {
-            const resp = await fetch('/api/models');
+            const resp = await this.authFetch('/api/models');
             const data = await resp.json();
 
             this.modelSelect.innerHTML = '';
@@ -503,7 +701,7 @@ class NexusApp {
         if (!model) return;
 
         try {
-            await fetch('/api/model', {
+            await this.authFetch('/api/model', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ model }),
@@ -516,7 +714,7 @@ class NexusApp {
 
     async loadMCPStatus() {
         try {
-            const resp = await fetch('/api/mcp/status');
+            const resp = await this.authFetch('/api/mcp/status');
             const data = await resp.json();
 
             this.mcpPanel.innerHTML = '';
@@ -547,7 +745,7 @@ class NexusApp {
     async reloadMCP() {
         try {
             this.addSystemMessage('Reloading MCP configuration...');
-            const resp = await fetch('/api/mcp/reload', { method: 'POST' });
+            const resp = await this.authFetch('/api/mcp/reload', { method: 'POST' });
             const data = await resp.json();
             await this.loadMCPStatus();
             this.addSystemMessage('MCP configuration reloaded.');

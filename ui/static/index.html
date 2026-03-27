@@ -7,12 +7,46 @@
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-    <div id="app">
+    <!-- Login Screen -->
+    <div id="login-screen">
+        <div class="login-container">
+            <div class="login-header">
+                <h1 class="logo">NEXUS</h1>
+                <span class="version">v1.1</span>
+            </div>
+            <p class="login-subtitle">Multi-User Local AI Agent</p>
+
+            <div id="login-form">
+                <div id="login-error" class="login-error hidden"></div>
+                <input type="text" id="login-username" class="login-input" placeholder="Username" autocomplete="username">
+                <input type="password" id="login-password" class="login-input" placeholder="Password" autocomplete="current-password">
+                <button id="login-btn" class="btn btn-primary login-btn">Log In</button>
+                <div class="login-switch">
+                    Don't have an account? <a href="#" id="show-register">Register</a>
+                </div>
+            </div>
+
+            <div id="register-form" class="hidden">
+                <div id="register-error" class="register-error hidden"></div>
+                <input type="text" id="register-username" class="login-input" placeholder="Username" autocomplete="username">
+                <input type="text" id="register-display" class="login-input" placeholder="Display Name (optional)">
+                <input type="password" id="register-password" class="login-input" placeholder="Password (4+ chars)" autocomplete="new-password">
+                <input type="password" id="register-confirm" class="login-input" placeholder="Confirm Password" autocomplete="new-password">
+                <button id="register-btn" class="btn btn-primary login-btn">Create Account</button>
+                <div class="login-switch">
+                    Already have an account? <a href="#" id="show-login">Log In</a>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Main App (hidden until logged in) -->
+    <div id="app" class="hidden">
         <!-- Sidebar -->
         <aside id="sidebar">
             <div class="sidebar-header">
                 <h1 class="logo">NEXUS</h1>
-                <span class="version">v1.0</span>
+                <span class="version">v1.1</span>
             </div>
 
             <!-- Mode Selector -->
@@ -81,9 +115,21 @@
                 </label>
             </div>
 
+            <!-- User Profile -->
+            <div class="sidebar-section">
+                <h3 class="section-title">User</h3>
+                <div id="user-profile">
+                    <div class="user-info">
+                        <span class="user-avatar" id="user-avatar">?</span>
+                        <span id="user-display-name">Not logged in</span>
+                    </div>
+                </div>
+            </div>
+
             <div class="sidebar-footer">
                 <button id="clear-chat-btn" class="btn btn-secondary">Clear Chat</button>
                 <button id="new-session-btn" class="btn btn-secondary">New Session</button>
+                <button id="logout-btn" class="btn btn-secondary">Log Out</button>
             </div>
         </aside>
 

@@ -16,6 +16,7 @@ PROJECT_ROOT = Path(__file__).parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from core.agent import NexusAgent
+from core.user_manager import UserManager
 from ui.server import app
 
 # Load environment variables
@@ -34,45 +35,84 @@ def print_banner() -> None:
     """Print the startup banner."""
     banner = r"""
     ╔══════════════════════════════════════════╗
-    ║             NEXUS AGENT v1.0             ║
-    ║        Local AI Agent Framework          ║
+    ║             NEXUS AGENT v1.1             ║
+    ║      Multi-User Local AI Framework       ║
     ╚══════════════════════════════════════════╝
     """
     print(banner)
 
 
-async def initialize_agent() -> NexusAgent:
-    """Initialize the Nexus Agent and all subsystems."""
-    ollama_host = os.getenv("OLLAMA_HOST", "http://localhost:11434")
-    workspace_dir = os.getenv("WORKSPACE_DIR", str(PROJECT_ROOT / "workspace"))
-    data_dir = os.getenv("DATA_DIR", str(PROJECT_ROOT / "data"))
-    mcp_config = os.getenv("MCP_CONFIG", str(PROJECT_ROOT / "mcp_config.json"))
+class AgentManager:
+    """Manages per-user NexusAgent instances and shared resources."""
 
-    agent = NexusAgent(
-        ollama_host=ollama_host,
-        workspace_dir=workspace_dir,
-        data_dir=data_dir,
-        mcp_config=mcp_config,
-    )
+    def __init__(
+        self,
+        ollama_host: str,
+        data_dir: str,
+        workspace_dir: str,
+        mcp_config: str,
+    ) -> None:
+        self.ollama_host = ollama_host
+        self.data_dir = os.path.abspath(data_dir)
+        self.workspace_dir = os.path.abspath(workspace_dir)
+        self.mcp_config = mcp_config
+        self.user_manager = UserManager(self.data_dir)
+        self._agents: dict[str, NexusAgent] = {}
 
-    logger.info("Initializing Nexus Agent...")
-    logger.info("  Ollama: %s", ollama_host)
-    logger.info("  Workspace: %s", workspace_dir)
-    logger.info("  Data: %s", data_dir)
-    logger.info("  MCP Config: %s", mcp_config)
+    async def initialize(self) -> None:
+        """Initialize shared resources."""
+        os.makedirs(self.data_dir, exist_ok=True)
+        os.makedirs(self.workspace_dir, exist_ok=True)
+        await self.user_manager.initialize()
+        logger.info("Agent manager initialized")
+        logger.info("  Ollama: %s", self.ollama_host)
+        logger.info("  Data: %s", self.data_dir)
+        logger.info("  Workspace: %s", self.workspace_dir)
 
-    status = await agent.initialize()
+    async def get_agent(self, username: str) -> NexusAgent:
+        """Get or create an agent instance for a specific user."""
+        if username in self._agents:
+            return self._agents[username]
 
-    logger.info("Initialization complete:")
-    logger.info("  Ollama connected: %s", status.get("ollama", False))
-    logger.info("  Models available: %s", status.get("models_available", 0))
-    logger.info("  Selected model: %s", status.get("selected_model", "none"))
+        # Per-user directories
+        user_data = self.user_manager.get_user_data_dir(username)
+        user_workspace = self.user_manager.get_user_workspace_dir(username)
 
-    mcp_status = status.get("mcp", {})
-    connected = sum(1 for v in mcp_status.values() if v)
-    logger.info("  MCP servers: %d/%d connected", connected, len(mcp_status))
+        agent = NexusAgent(
+            ollama_host=self.ollama_host,
+            workspace_dir=user_workspace,
+            data_dir=user_data,
+            mcp_config=self.mcp_config,
+        )
 
-    return agent
+        logger.info("Initializing agent for user: %s", username)
+        status = await agent.initialize()
+
+        logger.info("Agent ready for %s: ollama=%s models=%s",
+                    username, status.get("ollama", False),
+                    status.get("models_available", 0))
+
+        self._agents[username] = agent
+        return agent
+
+    async def remove_agent(self, username: str) -> None:
+        """Shut down and remove a user's agent instance."""
+        agent = self._agents.pop(username, None)
+        if agent:
+            await agent.shutdown()
+            logger.info("Agent shut down for user: %s", username)
+
+    async def shutdown(self) -> None:
+        """Shut down all agent instances."""
+        for username, agent in self._agents.items():
+            try:
+                await agent.shutdown()
+                logger.info("Shut down agent for: %s", username)
+            except Exception as e:
+                logger.error("Error shutting down agent for %s: %s", username, e)
+        self._agents.clear()
+        await self.user_manager.close()
+        logger.info("Agent manager shut down")
 
 
 def main() -> None:
@@ -81,35 +121,41 @@ def main() -> None:
 
     host = os.getenv("HOST", "0.0.0.0")
     port = int(os.getenv("PORT", "8080"))
+    ollama_host = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+    data_dir = os.getenv("DATA_DIR", str(PROJECT_ROOT / "data"))
+    workspace_dir = os.getenv("WORKSPACE_DIR", str(PROJECT_ROOT / "workspace"))
+    mcp_config = os.getenv("MCP_CONFIG", str(PROJECT_ROOT / "mcp_config.json"))
 
-    # Initialize agent before starting server
+    # Create the agent manager
+    manager = AgentManager(
+        ollama_host=ollama_host,
+        data_dir=data_dir,
+        workspace_dir=workspace_dir,
+        mcp_config=mcp_config,
+    )
+
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
     try:
-        agent = loop.run_until_complete(initialize_agent())
+        loop.run_until_complete(manager.initialize())
     except Exception as e:
-        logger.error("Failed to initialize agent: %s", e)
-        logger.info("Starting server anyway - agent will retry on first request")
-        agent = NexusAgent(
-            ollama_host=os.getenv("OLLAMA_HOST", "http://localhost:11434"),
-            workspace_dir=os.getenv("WORKSPACE_DIR", str(PROJECT_ROOT / "workspace")),
-            data_dir=os.getenv("DATA_DIR", str(PROJECT_ROOT / "data")),
-            mcp_config=os.getenv("MCP_CONFIG", str(PROJECT_ROOT / "mcp_config.json")),
-        )
+        logger.error("Failed to initialize agent manager: %s", e)
+        logger.info("Starting server anyway - will retry on first request")
 
-    # Inject agent into the server module
+    # Inject manager into the server module
     import ui.server as server_module
-    server_module.agent = agent
+    server_module.agent_manager = manager
 
-    # Handle graceful shutdown
+    # Handle graceful shutdown (Windows-safe: SIGTERM not available)
     def shutdown_handler(sig: int, frame: object) -> None:
         logger.info("Shutting down...")
-        loop.run_until_complete(agent.shutdown())
+        loop.run_until_complete(manager.shutdown())
         sys.exit(0)
 
     signal.signal(signal.SIGINT, shutdown_handler)
-    signal.signal(signal.SIGTERM, shutdown_handler)
+    if sys.platform != "win32":
+        signal.signal(signal.SIGTERM, shutdown_handler)
 
     logger.info("Starting Nexus Agent at http://%s:%d", host, port)
     logger.info("Open the UI in your browser to start chatting!")
@@ -129,7 +175,7 @@ def main() -> None:
     except KeyboardInterrupt:
         logger.info("Interrupted - shutting down...")
     finally:
-        loop.run_until_complete(agent.shutdown())
+        loop.run_until_complete(manager.shutdown())
         loop.close()
 
 
