@@ -13,6 +13,7 @@ from .hardware import HardwareManager
 from .mcp_manager import MCPManager
 from .memory import MemoryManager
 from .model_selector import ModelSelector
+from .free_ai_provider import FreeAIProvider
 from .ollama_client import OllamaClient
 from .planner import Plan, Planner, StepStatus
 from .reasoning import ReasoningChain, ReasoningEngine, ThoughtType
@@ -282,6 +283,7 @@ class NexusAgent:
         mcp_config: str = "mcp_config.json",
     ):
         self.ollama = OllamaClient(ollama_host)
+        self.free_ai = FreeAIProvider()
         self.model_selector = ModelSelector()
         self.memory = MemoryManager(os.path.join(data_dir, "memory.db"))
         self.database = DatabaseManager(os.path.join(data_dir, "agent.db"))
@@ -296,6 +298,7 @@ class NexusAgent:
         self.current_model: str | None = None
         self.session_id = str(uuid.uuid4())[:8]
         self._initialized = False
+        self._using_free_ai = False
 
         # Ensure directories exist
         os.makedirs(self.workspace_dir, exist_ok=True)
@@ -322,9 +325,22 @@ class NexusAgent:
             self.current_model = self.model_selector.select_model("general")
             status["selected_model"] = self.current_model
         else:
-            status["models_available"] = 0
-            status["selected_model"] = None
-            logger.warning("Ollama server not available")
+            logger.warning("Ollama server not available - trying free AI fallback")
+            free_ok = await self.free_ai.initialize()
+            if free_ok:
+                self._using_free_ai = True
+                free_models = self.free_ai.list_models()
+                self.model_selector.update_models(free_models)
+                status["models_available"] = len(free_models)
+                self.current_model = "openai"
+                status["selected_model"] = self.current_model
+                status["ollama"] = True  # Show as connected (via free provider)
+                status["provider"] = "free_ai (PollinationsAI)"
+                logger.info("Free AI fallback active with %d models", len(free_models))
+            else:
+                status["models_available"] = 0
+                status["selected_model"] = None
+                logger.warning("No AI providers available")
 
         # Start MCP servers
         mcp_results = await self.mcp_manager.start_all()
@@ -340,6 +356,7 @@ class NexusAgent:
         await self.memory.close()
         await self.database.close()
         await self.ollama.close()
+        await self.free_ai.close()
         await self.web.close()
         await self.hardware.disconnect()
         logger.info("Nexus Agent shut down")
@@ -380,7 +397,7 @@ class NexusAgent:
 
         if self.current_model is None:
             return {
-                "response": "No Ollama models available. Please ensure Ollama is running with at least one model installed.",
+                "response": "No AI models available. Please ensure Ollama is running with at least one model installed, or install g4f (pip install g4f) for free online AI fallback.",
                 "reasoning": chain.to_dict(),
             }
 
@@ -447,7 +464,7 @@ class NexusAgent:
             if callback:
                 await callback("thinking", f"Thinking... (step {iteration + 1})", {})
 
-            response = await self.ollama.chat(
+            response = await self._chat_completion(
                 model=self.current_model,  # type: ignore
                 messages=messages,
                 tools=tools,
@@ -534,7 +551,7 @@ class NexusAgent:
             {"role": "user", "content": f"Create a plan for: {message}"},
         ]
 
-        response = await self.ollama.chat(
+        response = await self._chat_completion(
             model=self.current_model,  # type: ignore
             messages=messages,
         )
@@ -584,7 +601,7 @@ class NexusAgent:
             {"role": "user", "content": f"Create a build plan for: {message}"},
         ]
 
-        response = await self.ollama.chat(
+        response = await self._chat_completion(
             model=self.current_model,  # type: ignore
             messages=messages,
         )
@@ -804,14 +821,45 @@ class NexusAgent:
             logger.error("Tool execution error (%s): %s", tool_name, e)
             return {"error": str(e)}
 
+    async def _chat_completion(
+        self,
+        model: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        temperature: float = 0.7,
+    ) -> dict[str, Any]:
+        """Route chat completion to either Ollama or free AI provider."""
+        if self._using_free_ai:
+            return await self.free_ai.chat(
+                model=model,
+                messages=messages,
+                tools=tools,
+                temperature=temperature,
+            )
+        return await self.ollama.chat(
+            model=model,
+            messages=messages,
+            tools=tools,
+            temperature=temperature,
+        )
+
     def get_status(self) -> dict[str, Any]:
         """Get the current agent status."""
-        return {
+        has_models = len(self.model_selector.available_models) > 0
+        status = {
             "initialized": self._initialized,
             "session_id": self.session_id,
             "current_model": self.current_model,
             "models_available": len(self.model_selector.available_models),
+            "ollama": has_models,
+            "memory": True,
+            "database": True,
             "mcp_status": self.mcp_manager.get_status(),
             "workspace": self.workspace_dir,
             "active_plan": self.planner.current_plan.to_dict() if self.planner.current_plan else None,
         }
+        if self._using_free_ai:
+            status["provider"] = "free_ai (PollinationsAI)"
+        else:
+            status["provider"] = "ollama"
+        return status

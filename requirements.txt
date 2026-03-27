@@ -26,3 +26,6 @@ pydantic>=2.0,<3.0
 
 # Rich terminal output
 rich>=13.0,<14.0
+
+# Free AI fallback (when Ollama is unavailable)
+g4f>=0.4.0
