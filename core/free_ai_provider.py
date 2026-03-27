@@ -7,20 +7,12 @@ via PollinationsAI (no API key required).
 import logging
 from typing import Any
 
+import aiohttp
+
 logger = logging.getLogger(__name__)
 
-# Model mapping: friendly name -> g4f model identifier
-FREE_MODELS = {
-    "gpt-4o-mini": "gpt-4o-mini",
-    "openai": "openai",
-    "claude-hybridspace": "claude-hybridspace",
-    "deepseek-r1": "deepseek-r1",
-    "qwen-2.5-coder-32b": "qwen-2.5-coder-32b",
-    "llama-3.3-70b": "llama-3.3-70b",
-    "mistral-small": "mistral-small",
-}
-
-DEFAULT_MODEL = "openai"
+POLLINATIONS_MODELS_URL = "https://text.pollinations.ai/models"
+DEFAULT_MODEL = "openai-fast"
 
 
 class FreeAIProvider:
@@ -31,6 +23,7 @@ class FreeAIProvider:
         self._client = None
         self._provider = None
         self._current_model = DEFAULT_MODEL
+        self._models: dict[str, dict[str, Any]] = {}
 
     async def initialize(self) -> bool:
         """Check if g4f is available and initialize the client."""
@@ -41,7 +34,14 @@ class FreeAIProvider:
             self._client = Client(provider=PollinationsAI)
             self._provider = PollinationsAI
             self._available = True
-            logger.info("Free AI provider initialized (PollinationsAI)")
+
+            # Fetch actual available models from PollinationsAI API
+            await self._fetch_models()
+
+            logger.info(
+                "Free AI provider initialized (PollinationsAI) with %d models",
+                len(self._models),
+            )
             return True
         except ImportError:
             logger.warning("g4f not installed - free AI fallback unavailable")
@@ -50,22 +50,70 @@ class FreeAIProvider:
             logger.warning("Failed to initialize free AI provider: %s", e)
             return False
 
+    async def _fetch_models(self) -> None:
+        """Fetch available models from PollinationsAI API."""
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    POLLINATIONS_MODELS_URL, timeout=aiohttp.ClientTimeout(total=10)
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        self._models = {}
+                        for m in data:
+                            name = m.get("name", "")
+                            if not name:
+                                continue
+                            self._models[name] = m
+                            # Also register aliases
+                            for alias in m.get("aliases", []):
+                                self._models[alias] = m
+                        logger.info(
+                            "Fetched %d models from PollinationsAI", len(data)
+                        )
+                    else:
+                        logger.warning(
+                            "Failed to fetch models: HTTP %d", resp.status
+                        )
+                        self._models = {
+                            DEFAULT_MODEL: {
+                                "name": DEFAULT_MODEL,
+                                "description": "Default free model",
+                            }
+                        }
+        except Exception as e:
+            logger.warning("Error fetching PollinationsAI models: %s", e)
+            self._models = {
+                DEFAULT_MODEL: {
+                    "name": DEFAULT_MODEL,
+                    "description": "Default free model",
+                }
+            }
+
     @property
     def is_available(self) -> bool:
         return self._available
 
     def list_models(self) -> list[dict[str, Any]]:
-        """List available free models."""
-        return [
-            {
-                "name": name,
-                "model": model_id,
-                "size": 0,
-                "provider": "PollinationsAI (free)",
-                "modified_at": "",
-            }
-            for name, model_id in FREE_MODELS.items()
-        ]
+        """List available free models (unique model names only, no aliases)."""
+        seen: set[str] = set()
+        result = []
+        for name, info in self._models.items():
+            canonical = info.get("name", name)
+            if canonical in seen:
+                continue
+            seen.add(canonical)
+            desc = info.get("description", "Free model")
+            result.append(
+                {
+                    "name": canonical,
+                    "model": canonical,
+                    "size": 0,
+                    "provider": f"PollinationsAI (free) - {desc}",
+                    "modified_at": "",
+                }
+            )
+        return result
 
     async def chat(
         self,
@@ -86,8 +134,18 @@ class FreeAIProvider:
                 }
             }
 
-        # Map model name to g4f model id
-        model_id = FREE_MODELS.get(model, model)
+        # Resolve model name to canonical PollinationsAI name
+        # This bypasses g4f's broken alias mapping
+        model_info = self._models.get(model)
+        if model_info:
+            model_id = model_info.get("name", model)
+        else:
+            model_id = DEFAULT_MODEL
+            logger.warning(
+                "Model '%s' not found in PollinationsAI, using '%s'",
+                model,
+                DEFAULT_MODEL,
+            )
 
         # Clean messages - g4f expects simple role/content dicts
         clean_messages = []

@@ -332,7 +332,7 @@ class NexusAgent:
                 free_models = self.free_ai.list_models()
                 self.model_selector.update_models(free_models)
                 status["models_available"] = len(free_models)
-                self.current_model = "openai"
+                self.current_model = free_models[0]["name"] if free_models else "openai-fast"
                 status["selected_model"] = self.current_model
                 status["ollama"] = True  # Show as connected (via free provider)
                 status["provider"] = "free_ai (PollinationsAI)"
