@@ -43,17 +43,29 @@ IMPORTANT GUIDELINES:
 6. For complex tasks, create a plan first
 7. Reflect on results and adjust your approach as needed
 
-IMPORTANT: You MUST actually call tools to perform actions. Do NOT just describe what
-you would do or output JSON examples. When you want to use a tool, you must use a
-proper function/tool call. If your model supports tool calling, use the tool_calls
-format. Otherwise, output EXACTLY one JSON block per tool call in this format:
+CRITICAL RULE - TOOL CALLING:
+You MUST actually call tools to perform actions. Do NOT just describe what you would do.
+Do NOT show example JSON. Do NOT say "I would use write_file" - actually USE it.
+
+When you want to perform an action (write a file, run a command, search, etc.), output
+EXACTLY one tool call in this format - nothing else around it:
 
 ```tool_call
 {"name": "tool_name", "arguments": {"arg1": "value1"}}
 ```
 
-After calling a tool, wait for the result before continuing.
-Always explain what you're doing and why.
+For example, to write a file:
+
+```tool_call
+{"name": "write_file", "arguments": {"path": "hello.py", "content": "print('Hello')"}}
+```
+
+Rules:
+1. Output ONLY ONE tool call at a time
+2. After outputting a tool call, STOP and wait for the [Tool Result]
+3. Only after receiving the result, continue with your next action or response
+4. NEVER output tool calls as plain text or code examples - they must be in ```tool_call blocks
+5. Always explain briefly what you're about to do, then output the tool call block
 """
 
 

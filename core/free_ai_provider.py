@@ -4,6 +4,7 @@ Used when Ollama is not available, providing access to free AI models
 via PollinationsAI (no API key required).
 """
 
+import json
 import logging
 from typing import Any
 
@@ -161,6 +162,13 @@ class FreeAIProvider:
             else:
                 clean_messages.append({"role": role, "content": content})
 
+        # Inject tool descriptions into the system prompt so the model
+        # knows what tools are available (free providers don't support
+        # the native tools parameter)
+        if tools and clean_messages and clean_messages[0]["role"] == "system":
+            tool_desc = self._format_tools_for_prompt(tools)
+            clean_messages[0]["content"] += tool_desc
+
         try:
             response = self._client.chat.completions.create(
                 model=model_id,
@@ -182,6 +190,49 @@ class FreeAIProvider:
                     "content": f"Error from free AI provider: {e}",
                 }
             }
+
+    @staticmethod
+    def _format_tools_for_prompt(tools: list[dict[str, Any]]) -> str:
+        """Format tool definitions as text to inject into the system prompt.
+
+        Since free providers don't support the native tools parameter,
+        we describe the available tools in the system prompt so the model
+        knows what it can call.
+        """
+        lines = [
+            "\n\n## AVAILABLE TOOLS",
+            "You MUST use these tools by outputting a JSON block. "
+            "Do NOT just describe what you would do - actually call the tool.",
+            "To call a tool, output EXACTLY this format (no other text around it):\n",
+            '```tool_call',
+            '{"name": "tool_name", "arguments": {"arg1": "value1"}}',
+            '```\n',
+            "After outputting a tool call, STOP and wait for the result. "
+            "Do NOT output multiple tool calls at once.\n",
+            "Available tools:",
+        ]
+        for tool in tools:
+            func = tool.get("function", {})
+            name = func.get("name", "")
+            desc = func.get("description", "")
+            params = func.get("parameters", {})
+            props = params.get("properties", {})
+            required = params.get("required", [])
+
+            param_parts = []
+            for pname, pinfo in props.items():
+                req = " (required)" if pname in required else " (optional)"
+                param_parts.append(
+                    f"    - {pname}: {pinfo.get('description', pinfo.get('type', ''))}{req}"
+                )
+
+            lines.append(f"\n### {name}")
+            lines.append(f"  {desc}")
+            if param_parts:
+                lines.append("  Parameters:")
+                lines.extend(param_parts)
+
+        return "\n".join(lines)
 
     async def close(self) -> None:
         """Clean up resources."""
